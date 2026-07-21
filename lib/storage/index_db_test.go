@@ -487,7 +487,7 @@ func TestIndexDBOpenClose(t *testing.T) {
 func TestIndexDB(t *testing.T) {
 	defer testRemoveAll(t)
 
-	f := func(t *testing.T, concurrency int, disablePerDayIndex bool) {
+	f := func(t *testing.T, concurrency int, disableGlobalIndex, disablePerDayIndex bool) {
 		const metricGroups = 10
 		now := time.Now().UTC()
 		timestamp := now.UnixMilli()
@@ -501,6 +501,7 @@ func TestIndexDB(t *testing.T) {
 		}
 
 		s := MustOpenStorage(t.Name(), OpenOptions{
+			DisableGlobalIndex: disableGlobalIndex,
 			DisablePerDayIndex: disablePerDayIndex,
 		})
 		defer s.MustClose()
@@ -532,13 +533,19 @@ func TestIndexDB(t *testing.T) {
 	}
 
 	for _, concurrency := range []int{1, 4} {
-		for _, disablePerDayIndex := range []bool{false, true} {
-			name := fmt.Sprintf("concurrency=%d/disablePerDayIndex=%t", concurrency, disablePerDayIndex)
-			t.Run(name, func(t *testing.T) {
-				f(t, concurrency, disablePerDayIndex)
-				// Repeat the same test on non-empty reopened storage.
-				f(t, concurrency, disablePerDayIndex)
-			})
+		for _, disableGlobalIndex := range []bool{false, true} {
+			for _, disablePerDayIndex := range []bool{false, true} {
+				if disableGlobalIndex && disablePerDayIndex {
+					// Both indexes cannot be disabled at the same time.
+					continue
+				}
+				name := fmt.Sprintf("concurrency=%d/disableGlobalIndex=%t/disablePerDayIndex=%t", concurrency, disableGlobalIndex, disablePerDayIndex)
+				t.Run(name, func(t *testing.T) {
+					f(t, concurrency, disableGlobalIndex, disablePerDayIndex)
+					// Repeat the same test on non-empty reopened storage.
+					f(t, concurrency, disableGlobalIndex, disablePerDayIndex)
+				})
+			}
 		}
 	}
 }
