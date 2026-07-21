@@ -14,6 +14,29 @@ aliases:
 ---
 Please find the changelog for VictoriaMetrics Anomaly Detection below.
 
+## v1.30.0
+Released: 23-07-2026
+
+- FEATURE: Added univariate and multivariate online [Temporal Envelope](https://docs.victoriametrics.com/anomaly-detection/components/models/#temporal-envelope) models for complex time-series profiles. They combine robust causal trend, compact calendar and learned holiday behavior, changepoint adaptation, residual prediction intervals, future-horizon forecasts, and optional cross-series dependency detection in bounded state.
+
+- FEATURE: Added asynchronous [`/api/v1/autotune/tasks`](https://docs.victoriametrics.com/anomaly-detection/components/models/#shared-asynchronous-autotune-workflow) endpoints and improved unsupervised tuning with model-capability-aware objectives, optional causal exact validation for online models, constrained alert-volume selection, fitted-state complexity tie-breaking, and frozen model-specific parameters.
+
+- FEATURE: Added `/api/v1/timeseries/characteristics` for bounded analysis of trend, calendar seasonality, changepoints, gaps, and intermittent or spiky behavior across sampled query results. This improves automated model selection and search-space suggestions in both agentic workflows and [AI Copilot](https://docs.victoriametrics.com/anomaly-detection/ui/#ai-assistance)-backed [UI](https://docs.victoriametrics.com/anomaly-detection/ui/) experiments.
+
+- UI: Updated [vmanomaly UI](https://docs.victoriametrics.com/anomaly-detection/ui/) from [v1.7.2](https://docs.victoriametrics.com/anomaly-detection/ui/#v172) to [v1.8.0](https://docs.victoriametrics.com/anomaly-detection/ui/#v180). Notable mentions are model and query configuration, query prettification, fullscreen charts, out-of-date results alert and improved [AI Copilot](https://docs.victoriametrics.com/anomaly-detection/ui/#ai-assistance) suggestion and cancellation behavior.
+
+- FEATURE: Made AI-assisted configuration more reliable with reusable [vmanomaly workflow skills](https://github.com/VictoriaMetrics/skills), data-aware model suggestions, protocol-safe cancellation and synchronized query, model, and anomaly-setting updates in [UI](https://docs.victoriametrics.com/anomaly-detection/ui/).
+
+- IMPROVEMENT: Fitted history can be retained as a stronger prior through `history_strength` argument, requiring a reduced number of observations (say 2 weeks for weekly seasonality) to be effective if the history window is a good indicator of "normal" data patterns. Models supported: `mad_online`, `zscore_online`, `quantile_online`.
+
+- IMPROVEMENT: Improved bounded datasource operation with optional ad-hoc series limits, stale-series lookback caps, and propagation of configured per-query sampling periods to models and autotune trials.
+
+- IMPROVEMENT: Added `reader.fetch_timeout` and `reader.processing_timeout` for [`VmReader`](https://docs.victoriametrics.com/anomaly-detection/components/reader/#vm-reader) and [`VLogsReader`](https://docs.victoriametrics.com/anomaly-detection/components/reader/#victorialogs-reader), allowing datasource reads and post-fetch processing to be tuned *independently* while preserving `reader.timeout` as the backward-compatible default for both phases.
+
+- BUGFIX: Fixed [backtesting runs](https://docs.victoriametrics.com/anomaly-detection/components/scheduler/#backtesting-scheduler) across multiple fit cycles and for auto-tuned online wrappers, preventing duplicate or missing predictions while retaining causal model updates and restoration of compatible legacy auto-tuned state.
+
+- BUGFIX: Prevented service shutdown after a [`PeriodicScheduler`](https://docs.victoriametrics.com/anomaly-detection/components/scheduler/#periodic-scheduler) worker dies by adding bounded restart attempts with backoff and exposing restart health through [startup metrics](https://docs.victoriametrics.com/anomaly-detection/components/monitoring/#startup-metrics).
+
 ## v1.29.7
 Released: 2026-06-25
 

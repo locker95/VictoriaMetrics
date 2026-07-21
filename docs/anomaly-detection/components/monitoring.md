@@ -352,6 +352,20 @@ For detailed guidance on configuring mTLS parameters such as `verify_tls`, `tls_
             <td>Gauge</td>
             <td>Timestamp of the last successful config [hot-reload](https://docs.victoriametrics.com/anomaly-detection/components/#hot-reload) in seconds since epoch {{% available_from "v1.25.1" anomaly %}}</td>
         </tr>
+        <tr>
+            <td>
+<span style="white-space: nowrap;">`vmanomaly_scheduler_alive`</span>
+            </td>
+            <td>Gauge</td>
+            <td>Whether the scheduler worker thread identified by `scheduler_alias` and `preset` is alive (`1`) or not (`0`) {{% available_from "v1.30.0" anomaly %}}.</td>
+        </tr>
+        <tr>
+            <td>
+<span style="white-space: nowrap;">`vmanomaly_scheduler_restarts_total`</span>
+            </td>
+            <td>Counter</td>
+            <td>Number of bounded scheduler restart attempts {{% available_from "v1.30.0" anomaly %}}, labeled by `scheduler_alias`, `preset`, and `status` (`success` or `failure`).</td>
+        </tr>
     </tbody>
 </table>
 

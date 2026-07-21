@@ -193,9 +193,10 @@ The best applications of this mode are:
 
 ### What you can do with Copilot
 
-- **Ask questions** about any model (e.g. [Prophet](https://docs.victoriametrics.com/anomaly-detection/components/models/#prophet) or [Z-score](https://docs.victoriametrics.com/anomaly-detection/components/models/#online-z-score) - parameters, trade-offs, when to use each)
+- **Ask questions** about any model (e.g. [Temporal Envelope](https://docs.victoriametrics.com/anomaly-detection/components/models/#temporal-envelope), [Prophet](https://docs.victoriametrics.com/anomaly-detection/components/models/#prophet), or [Z-score](https://docs.victoriametrics.com/anomaly-detection/components/models/#online-z-score) - parameters, trade-offs, when to use each)
 - **Improve detection quality** - describe what's wrong ("too many false positives", "missing spikes") and Copilot reads the config, searches the docs, and proposes a validated configuration change to fix the issue.
 - **Get config suggestions inline** - suggestions appear as interactive cards with an explanation and a YAML diff; click **Apply** to write the change directly to your current settings, or **Decline** to keep the conversation going.
+- {{% available_from "v1.30.0" anomaly %}} **Profile and tune the real query** - with [mcp-vmanomaly](#mcp-tools-server) connected, Copilot can inspect bounded time-series characteristics, recommend an online model, start an asynchronous autotune task, and apply its validated query and model suggestions.
 
 ### How it works
 
@@ -212,7 +213,7 @@ AI Assistant is disabled by default; enable it with `VMANOMALY_COPILOT_ENABLED=t
 Supported providers and model formats:
 
 - **Anthropic** - set `ANTHROPIC_API_KEY`; model format: `anthropic:<model>`
-  - Examples: `claude-haiku-4-5`, `claude-sonnet-4-6`; see [full list](https://platform.claude.com/docs/en/about-claude/models/overview#latest-models-comparison)
+  - Examples: `claude-haiku-4-5`, `claude-sonnet-5`; see [full list](https://platform.claude.com/docs/en/about-claude/models/overview#latest-models-comparison)
 - **OpenAI** - set `OPENAI_API_KEY`; model format: `openai:<model>` or `openai-responses:<model>`
   - Examples: `gpt-5-mini`, `gpt-5.2`; see [full list](https://platform.openai.com/docs/models)
   - {{% available_from "v1.29.1" anomaly %}} OpenAI-compatible non-OpenAI providers are supported through `OPENAI_BASE_URL` + `OPENAI_API_KEY`
@@ -315,7 +316,7 @@ docker run -it --rm \
   -e VMANOMALY_MCP_SERVER_URL=http://mcp-vmanomaly:8081/mcp \
   -p 8080:8080 \
   -p 8490:8490 \
-  victoriametrics/vmanomaly:v1.29.7 \
+  victoriametrics/vmanomaly:v1.30.0 \
   vmanomaly_config.yaml
 ```
 
@@ -639,6 +640,29 @@ If the **results** look good and the **model configuration should be deployed in
 ![vmanomaly-ui-example-alert-menu](vmanomaly-ui-example-alert-menu.webp)
 
 ## Changelog
+
+### v1.8.0
+Released: 23-07-2026
+
+vmanomaly version: [v1.30.0](https://docs.victoriametrics.com/anomaly-detection/changelog/#v1300)
+
+- FEATURE: UX Improvements, refreshed interface with clearer model and query forms, inline configuration previews, and fullscreen chart controls.
+
+- IMPROVEMENT: Boosted [AI Copilot](#ai-assistance) stability and suggestions quality, aligned with MCP/skills toolset, and proper handling of canceled or incomplete tool calls.
+
+- Server (production-running) models and queries can be accessed and selected from the UI, with a new "Queries" button, while model selection now includes a drop-down for server-configured scheduled models in model wizard.
+
+- IMPROVEMENT: Added query prettification and stable value formatting, including platform-aware keyboard-shortcut hints.
+
+- IMPROVEMENT: Results now visibly switch to an out-of-date state after the query, time range, or model configuration changes. The action updates to rerun detection and remains visible in both expanded and collapsed model views.
+
+- IMPROVEMENT: Chart range navigation commits one query on interaction completion instead of issuing many intermediate requests.
+
+- IMPROVEMENT: Compact consecutive identical [AI Copilot](#ai-assistance) tool calls, keep query/model/anomaly suggestions synchronized, and recover cleanly from canceled or incomplete tool calls.
+
+- BUGFIX: Fixed exact UI backtesting across multiple fit cycles and for auto-tuned online wrappers, preventing *duplicate or missing predictions* while retaining causal model updates and restoration of compatible legacy auto-tuned state.
+
+- BUGFIX: Kept automatic trailing-slash redirects for configured path prefixes and `/vmui` relative to the public origin, preventing internal backend hostnames from leaking through reverse proxies such as `vmauth`.
 
 ### v1.7.2
 Released: 2026-06-25

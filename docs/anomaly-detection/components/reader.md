@@ -263,7 +263,33 @@ BasicAuth password. If set, it will be used to authenticate the request.
 `30s`
             </td>
             <td>
-Timeout for the requests, passed as a string
+Backward-compatible timeout used for both datasource fetches and post-fetch processing when `fetch_timeout` or `processing_timeout` are not set.
+            </td>
+        </tr>
+        <tr>
+            <td>
+
+<span style="white-space: nowrap;">`fetch_timeout`</span>
+            </td>
+            <td>
+
+Not set (`timeout` fallback)
+            </td>
+            <td>
+Optional timeout {{% available_from "v1.30.0" anomaly %}} for each datasource read request. Use values such as `5s`, `30s`, or `1m`.
+            </td>
+        </tr>
+        <tr>
+            <td>
+
+<span style="white-space: nowrap;">`processing_timeout`</span>
+            </td>
+            <td>
+
+Not set (`timeout` fallback)
+            </td>
+            <td>
+Optional timeout {{% available_from "v1.30.0" anomaly %}} for post-fetch processing that prepares returned data for fit or inference. High-cardinality queries may need a larger processing timeout than their datasource fetch timeout.
             </td>
         </tr>
         <tr>
@@ -362,6 +388,19 @@ If True, then query will be performed from the last seen timestamp for a given s
         <tr>
             <td>
 
+<span style="white-space: nowrap;">`query_last_seen_max_lookback`</span>
+            </td>
+            <td>
+
+`None`
+            </td>
+            <td>
+Optional hard cap {{% available_from "v1.30.0" anomaly %}} for how far `query_from_last_seen_timestamp` may move a query start into the past to recover skipped inference intervals. When configured below the query step, the effective cap is raised to one step. Examples: `5m`, `1h`.
+            </td>
+        </tr>
+        <tr>
+            <td>
+
 <span style="white-space: nowrap;">`latency_offset`</span>
             </td>
             <td>
@@ -395,7 +434,7 @@ Optional arg{{% available_from "v1.17.0" anomaly %}} overrides how `search.maxPo
 `UTC`
             </td>
             <td>
-Optional argument{{% available_from "v1.18.0" anomaly %}} specifies the [IANA](https://nodatime.org/TimeZones) timezone to account for local shifts, like [DST](https://en.wikipedia.org/wiki/Daylight_saving_time), in models sensitive to seasonal patterns (e.g., [`ProphetModel`](https://docs.victoriametrics.com/anomaly-detection/components/models/#prophet) or [`OnlineQuantileModel`](https://docs.victoriametrics.com/anomaly-detection/components/models/#online-seasonal-quantile)). Defaults to `UTC` if not set and can be overridden on a [per-query basis](#per-query-parameters).
+Optional argument {{% available_from "v1.18.0" anomaly %}} specifies the [IANA](https://nodatime.org/TimeZones) timezone to account for local shifts, like [DST](https://en.wikipedia.org/wiki/Daylight_saving_time), in models sensitive to seasonal patterns (e.g., [`TemporalEnvelopeModel`](https://docs.victoriametrics.com/anomaly-detection/components/models/#temporal-envelope), [`ProphetModel`](https://docs.victoriametrics.com/anomaly-detection/components/models/#prophet), or [`OnlineQuantileModel`](https://docs.victoriametrics.com/anomaly-detection/components/models/#online-seasonal-quantile)). Defaults to `UTC` if not set and can be overridden on a [per-query basis](#per-query-parameters).
             </td>
         </tr>
         <tr>
@@ -461,6 +500,9 @@ reader:
       # tenant_id: '1:0'  # if set, overrides reader-level tenant_id
       # offset: '-15s'  # if set, overrides reader-level offset
   sampling_period: '1m'
+  timeout: '30s'  # backward-compatible default for both phases
+  fetch_timeout: '30s'  # timeout for each datasource request, overrides `timeout` if set
+  processing_timeout: '1m'  # timeout for preparing fetched series for fit/infer, overrides `timeout` if set
   query_from_last_seen_timestamp: True  # false by default
   latency_offset: '1ms'
   series_processing_batch_size: 8
@@ -800,7 +842,33 @@ Frequency of the points returned. Will be converted to `/select/stats_query_rang
 `30s`
             </td>
             <td>
-(Optional) Specifies the maximum duration to wait for a query to complete before timing out. Can be set on a [per-query basis](#per-query-parameters-1) to override the reader-level setting.
+(Optional) Backward-compatible timeout used for both datasource fetches and post-fetch processing when `fetch_timeout` or `processing_timeout` are not set.
+            </td>
+        </tr>
+        <tr>
+            <td>
+
+<span style="white-space: nowrap;">`fetch_timeout`</span>
+            </td>
+            <td>
+
+Not set (`timeout` fallback)
+            </td>
+            <td>
+Optional timeout {{% available_from "v1.30.0" anomaly %}} for each VictoriaLogs datasource read request. Use values such as `5s`, `30s`, or `1m`.
+            </td>
+        </tr>
+        <tr>
+            <td>
+
+<span style="white-space: nowrap;">`processing_timeout`</span>
+            </td>
+            <td>
+
+Not set (`timeout` fallback)
+            </td>
+            <td>
+Optional timeout {{% available_from "v1.30.0" anomaly %}} for post-fetch processing that prepares returned data for fit or inference. High-cardinality results may need a larger processing timeout than their datasource fetch timeout.
             </td>
         </tr>
         <tr>
@@ -906,6 +974,19 @@ If a path to a CA bundle file (like `ca.crt`), it will verify the certificate us
 Optional argument {{% available_from "v1.29.7" anomaly %}}, allows specifying the number of time series to process together while preparing data for fit or infer stages. Defaults to `8`. Suggested values are 4-16 for high-cardinality queries.
             </td>
         </tr>
+        <tr>
+            <td>
+
+<span style="white-space: nowrap;">`query_last_seen_max_lookback`</span>
+            </td>
+            <td>
+
+`None`
+            </td>
+            <td>
+Optional hard cap {{% available_from "v1.30.0" anomaly %}} for how far last-seen recovery may move a query start into the past. Examples: `5m`, `1h`.
+            </td>
+        </tr>
     </tbody>
 </table>
 
@@ -927,7 +1008,9 @@ reader:
   series_processing_batch_size: 8
   data_range: [0, 'inf']  # reader-level
   offset: '0s'  # reader-level
-  timeout: '30s'
+  timeout: '30s'  # backward-compatible default for both phases
+  fetch_timeout: '30s'  # timeout for each datasource request, overrides `timeout` if set
+  processing_timeout: '1m'  # timeout for preparing fetched series for fit/infer, overrides `timeout` if set
   queries:
     # one query returning 1 result fields (avg_duration), it will have __name__ label (series name) as `duration_30m__avg`
     duration_avg_30m:
