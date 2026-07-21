@@ -29,6 +29,8 @@ export const supportedDurations = [
 
 const shortDurations = supportedDurations.map(d => d.short);
 
+const durationUnits = [...shortDurations].sort((a, b) => b.length - a.length).join("|");
+
 export const sameTs = (a: number, b: number) => {
   return roundToThousandths(a) === roundToThousandths(b);
 };
@@ -98,6 +100,16 @@ export const getSecondsFromDuration = (dur: string) => {
   }, {});
 
   return dayjs.duration(durObject).asSeconds();
+};
+
+export const getMillisecondsFromDuration = (dur: string): number => {
+  const fullRegexp = new RegExp(`^(?:\\d+(?:\\.\\d+)?(?:${durationUnits}))+$`);
+
+  if (!fullRegexp.test(dur)) {
+    throw new Error(`Invalid duration: "${dur}"`);
+  }
+
+  return getSecondsFromDuration(dur) * 1000;
 };
 
 const instantQueryViews = [DisplayType.table, DisplayType.code];
@@ -276,4 +288,3 @@ export const getNanoTimestamp = (dateStr: string): bigint => {
   // Return the full timestamp in nanoseconds as a BigInt
   return BigInt(baseMs) * 1000000n + BigInt(extraNano);
 };
-
