@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -841,7 +843,7 @@ func TestGetLeastLoadedBackendURL(t *testing.T) {
 	up.loadBalancingPolicy = "least_loaded"
 
 	pbus := up.bus.Load()
-	bus := pbus.bus
+	bus := pbus.groups[0].bus
 
 	fn := func(ns ...int) {
 		t.Helper()
@@ -913,7 +915,7 @@ func TestBrokenBackend(t *testing.T) {
 	})
 	up.loadBalancingPolicy = "least_loaded"
 	pbus := up.bus.Load()
-	bus := pbus.bus
+	bus := pbus.groups[0].bus
 
 	// explicitly mark one of the backends as broken
 	bus[1].setBroken()
@@ -936,7 +938,7 @@ func TestDiscoverBackendIPsWithIPV6(t *testing.T) {
 
 		up.discoverBackendAddrsIfNeeded()
 		pbus := up.bus.Load()
-		bus := pbus.bus
+		bus := pbus.groups[0].bus
 
 		if len(bus) != 1 {
 			t.Fatalf("expected url list to be of size 1; got %d instead", len(bus))
@@ -996,6 +998,104 @@ func TestDiscoverBackendIPsWithIPV6(t *testing.T) {
 
 }
 
+func TestAreEqualBackendURLGroups(t *testing.T) {
+	newGroup := func(hosts ...string) *backendURLGroup {
+		g := &backendURLGroup{}
+		for _, h := range hosts {
+			g.bus = append(g.bus, &backendURL{url: &url.URL{Host: h}})
+		}
+		return g
+	}
+
+	f := func(a, b []*backendURLGroup, expected bool) {
+		t.Helper()
+		if got := areEqualBackendURLGroups(a, b); got != expected {
+			t.Fatalf("unexpected result; got %v; want %v", got, expected)
+		}
+	}
+
+	// identical grouping
+	f(
+		[]*backendURLGroup{newGroup("10.0.0.1", "10.0.0.2"), newGroup("10.0.0.3")},
+		[]*backendURLGroup{newGroup("10.0.0.1", "10.0.0.2"), newGroup("10.0.0.3")},
+		true,
+	)
+
+	// different number of groups
+	f(
+		[]*backendURLGroup{newGroup("10.0.0.1")},
+		[]*backendURLGroup{newGroup("10.0.0.1"), newGroup("10.0.0.2")},
+		false,
+	)
+
+	// the flattened address sequence is unchanged, but an address moved across the group boundary
+	f(
+		[]*backendURLGroup{newGroup("10.0.0.1", "10.0.0.2"), newGroup("10.0.0.3")},
+		[]*backendURLGroup{newGroup("10.0.0.1"), newGroup("10.0.0.2", "10.0.0.3")},
+		false,
+	)
+
+	// genuinely different content
+	f(
+		[]*backendURLGroup{newGroup("10.0.0.1")},
+		[]*backendURLGroup{newGroup("10.0.0.9")},
+		false,
+	)
+}
+
+func TestDiscoverBackendAddrsIfNeededDetectsGroupBoundaryShift(t *testing.T) {
+	customResolver := &fakeResolver{
+		Resolver: &net.Resolver{},
+		lookupIPAddrResults: map[string][]net.IPAddr{
+			"zonea": {
+				{IP: net.ParseIP("10.0.0.1")},
+				{IP: net.ParseIP("10.0.0.2")},
+			},
+			"zoneb": {
+				{IP: net.ParseIP("10.0.0.3")},
+			},
+		},
+	}
+	origResolver := netutil.Resolver
+	netutil.Resolver = customResolver
+	defer func() {
+		netutil.Resolver = origResolver
+	}()
+
+	up := mustParseURLs([]string{"http://zonea", "http://zoneb"})
+	up.discoverBackendIPs = true
+
+	up.discoverBackendAddrsIfNeeded()
+	bus := up.bus.Load()
+	if len(bus.groups) != 2 || len(bus.groups[0].bus) != 2 || len(bus.groups[1].bus) != 1 {
+		t.Fatalf("unexpected initial grouping: zonea=%d zoneb=%d", len(bus.groups[0].bus), len(bus.groups[1].bus))
+	}
+
+	// Simulate 10.0.0.2 moving from zonea to zoneb. The flattened address sequence
+	// stays [10.0.0.1, 10.0.0.2, 10.0.0.3], but the group boundaries shift, so the
+	// rediscovery must still be picked up.
+	customResolver.lookupIPAddrResults["zonea"] = []net.IPAddr{
+		{IP: net.ParseIP("10.0.0.1")},
+	}
+	customResolver.lookupIPAddrResults["zoneb"] = []net.IPAddr{
+		{IP: net.ParseIP("10.0.0.2")},
+		{IP: net.ParseIP("10.0.0.3")},
+	}
+	up.nextDiscoveryDeadline.Store(0)
+	up.discoverBackendAddrsIfNeeded()
+
+	bus = up.bus.Load()
+	if len(bus.groups) != 2 {
+		t.Fatalf("unexpected groups count after rediscovery: %d", len(bus.groups))
+	}
+	if len(bus.groups[0].bus) != 1 || bus.groups[0].bus[0].url.Host != "10.0.0.1:" {
+		t.Fatalf("unexpected zonea group after rediscovery: %v", bus.groups[0].bus)
+	}
+	if len(bus.groups[1].bus) != 2 {
+		t.Fatalf("unexpected zoneb group size after rediscovery; got %d; want 2", len(bus.groups[1].bus))
+	}
+}
+
 func TestLogRequest(t *testing.T) {
 	ui := &UserInfo{AccessLog: &AccessLog{}}
 
@@ -1041,7 +1141,8 @@ func TestGetFirstAvailableBackend(t *testing.T) {
 			}
 			bus[i].broken.Store(broken[i])
 		}
-		bu := getFirstAvailableBackendURL(bus)
+		g := &backendURLGroup{bus: bus}
+		bu := g.getFirstAvailable()
 		if bu == nil {
 			t.Fatalf("unexpected nil backend")
 		}
@@ -1056,6 +1157,195 @@ func TestGetFirstAvailableBackend(t *testing.T) {
 	f([]bool{true, true, true}, 0)
 	f([]bool{true}, 0)
 
+}
+
+func newTestGroup(broken ...bool) *backendURLGroup {
+	ctx, cancel := context.WithCancel(context.Background())
+	bhc := &backendHealthCheck{
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	g := &backendURLGroup{
+		bus: make([]*backendURL, len(broken)),
+	}
+	for i, b := range broken {
+		g.bus[i] = &backendURL{
+			url: &url.URL{Host: fmt.Sprintf("target-%d", i)},
+			bhc: bhc,
+		}
+		g.bus[i].broken.Store(b)
+	}
+	return g
+}
+
+func TestGetFirstAvailableGroup(t *testing.T) {
+	// the first group is available
+	bus := &backendURLs{groups: []*backendURLGroup{newTestGroup(false), newTestGroup(false)}}
+	if g := bus.getFirstAvailable(); g != bus.groups[0] {
+		t.Fatalf("expecting the first group to be returned")
+	}
+
+	// the first group is fully broken - falls back to the second one
+	bus = &backendURLs{groups: []*backendURLGroup{newTestGroup(true), newTestGroup(false)}}
+	if g := bus.getFirstAvailable(); g != bus.groups[1] {
+		t.Fatalf("expecting the second group to be returned")
+	}
+
+	// the first group has a non-broken target - it is still considered available
+	bus = &backendURLs{groups: []*backendURLGroup{newTestGroup(true, false), newTestGroup(false)}}
+	if g := bus.getFirstAvailable(); g != bus.groups[0] {
+		t.Fatalf("expecting the first group to be returned, since it has a non-broken target")
+	}
+
+	// all groups are fully broken - the first one is returned
+	bus = &backendURLs{groups: []*backendURLGroup{newTestGroup(true), newTestGroup(true)}}
+	if g := bus.getFirstAvailable(); g != bus.groups[0] {
+		t.Fatalf("expecting the first group to be returned when all groups are broken")
+	}
+}
+
+func TestGetLeastLoadedGroup(t *testing.T) {
+	g0 := newTestGroup(false)
+	g1 := newTestGroup(false)
+	var n atomic.Uint32
+	bus := &backendURLs{groups: []*backendURLGroup{g0, g1}, n: &n}
+
+	// both groups are idle - the first one is picked
+	if g := bus.getLeastLoaded(); g != g0 {
+		t.Fatalf("expecting g0 to be returned when all groups are idle")
+	}
+
+	// g0 becomes more loaded than g1 - g1 must be picked
+	g0.bus[0].concurrentRequests.Add(5)
+	if g := bus.getLeastLoaded(); g != g1 {
+		t.Fatalf("expecting g1 to be returned when it is less loaded than g0")
+	}
+
+	// g1 is broken - g0 must be picked despite being more loaded
+	g1.bus[0].setBroken()
+	if g := bus.getLeastLoaded(); g != g0 {
+		t.Fatalf("expecting g0 to be returned when g1 is broken")
+	}
+
+	// all groups are broken - the first one is returned
+	g0.bus[0].setBroken()
+	if g := bus.getLeastLoaded(); g != g0 {
+		t.Fatalf("expecting g0 to be returned when all groups are broken")
+	}
+}
+
+func TestGetBackendURLTwoTier(t *testing.T) {
+	// Simulates two backends (busOriginal entries), each expanded into two discovered targets.
+	up := &URLPrefix{}
+	up.backendGroupCounters = make([]atomic.Uint32, 2)
+	bus := newBackendURLs(&up.n)
+	bus.addGroup([]*url.URL{{Host: "g0-a"}, {Host: "g0-b"}}, &up.backendGroupCounters[0])
+	bus.addGroup([]*url.URL{{Host: "g1-a"}, {Host: "g1-b"}}, &up.backendGroupCounters[1])
+
+	up.bus.Store(bus)
+	up.loadBalancingPolicy = "first_available"
+	up.backendLoadBalancingPolicy = "first_available"
+
+	if n := up.getBackendsCount(); n != 4 {
+		t.Fatalf("unexpected backends count; got %d; want 4", n)
+	}
+
+	// Both policies are first_available, so vmauth must always pick group0's first target.
+	for range 5 {
+		bu := up.getBackendURL()
+		if bu.url.Host != "g0-a" {
+			t.Fatalf("unexpected target; got %q; want g0-a", bu.url.Host)
+		}
+		bu.put()
+	}
+
+	// Mark group0's first target broken - the backend-level policy falls back to g0-b,
+	// while the top-level group selection still prefers group0, since it has a non-broken target.
+	bus.groups[0].bus[0].setBroken()
+	bu := up.getBackendURL()
+	if bu.url.Host != "g0-b" {
+		t.Fatalf("unexpected target; got %q; want g0-b", bu.url.Host)
+	}
+	bu.put()
+
+	// Mark group0 fully broken - the top-level selection falls back to group1.
+	bus.groups[0].bus[1].setBroken()
+	bu = up.getBackendURL()
+	if bu.url.Host != "g1-a" {
+		t.Fatalf("unexpected target; got %q; want g1-a", bu.url.Host)
+	}
+	bu.put()
+}
+
+func TestInitURLsBackendLoadBalancingPolicy(t *testing.T) {
+	f := func(ui *UserInfo, expectedLBP, expectedBLBP string) {
+		t.Helper()
+
+		if err := ui.initURLs(); err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		up := ui.URLPrefix
+		if up == nil {
+			up = ui.URLMaps[0].URLPrefix
+		}
+		if up.loadBalancingPolicy != expectedLBP {
+			t.Fatalf("unexpected loadBalancingPolicy; got %q; want %q", up.loadBalancingPolicy, expectedLBP)
+		}
+		if up.backendLoadBalancingPolicy != expectedBLBP {
+			t.Fatalf("unexpected backendLoadBalancingPolicy; got %q; want %q", up.backendLoadBalancingPolicy, expectedBLBP)
+		}
+	}
+
+	// Nothing set - both default to least_loaded.
+	f(&UserInfo{
+		URLPrefix: mustParseURL("http://foo.bar"),
+	}, "least_loaded", "least_loaded")
+
+	// load_balancing_policy is set, backend_load_balancing_policy is not - it inherits load_balancing_policy.
+	f(&UserInfo{
+		URLPrefix:           mustParseURL("http://foo.bar"),
+		LoadBalancingPolicy: "first_available",
+	}, "first_available", "first_available")
+
+	// Both are explicitly set to different values.
+	f(&UserInfo{
+		URLPrefix:                  mustParseURL("http://foo.bar"),
+		LoadBalancingPolicy:        "first_available",
+		BackendLoadBalancingPolicy: "least_loaded",
+	}, "first_available", "least_loaded")
+
+	// url_map inherits backend_load_balancing_policy from its own effective load_balancing_policy.
+	f(&UserInfo{
+		LoadBalancingPolicy: "first_available",
+		URLMaps: []URLMap{
+			{
+				SrcPaths:  getRegexs([]string{"/foo"}),
+				URLPrefix: mustParseURL("http://foo.bar"),
+			},
+		},
+	}, "first_available", "first_available")
+
+	// url_map overrides backend_load_balancing_policy explicitly.
+	f(&UserInfo{
+		LoadBalancingPolicy: "first_available",
+		URLMaps: []URLMap{
+			{
+				SrcPaths:                   getRegexs([]string{"/foo"}),
+				URLPrefix:                  mustParseURL("http://foo.bar"),
+				BackendLoadBalancingPolicy: "least_loaded",
+			},
+		},
+	}, "first_available", "least_loaded")
+}
+
+func TestInitURLsBackendLoadBalancingPolicyInvalid(t *testing.T) {
+	ui := &UserInfo{
+		URLPrefix:                  mustParseURL("http://foo.bar"),
+		BackendLoadBalancingPolicy: "bogus",
+	}
+	if err := ui.initURLs(); err == nil {
+		t.Fatalf("expecting non-nil error for invalid backend_load_balancing_policy")
+	}
 }
 
 func getRegexs(paths []string) []*Regex {
@@ -1092,14 +1382,12 @@ func mustParseURL(u string) *URLPrefix {
 }
 
 func mustParseURLs(us []string) *URLPrefix {
-	bus := newBackendURLs()
 	urls := make([]*url.URL, len(us))
 	for i, u := range us {
 		pu, err := url.Parse(u)
 		if err != nil {
 			panic(fmt.Errorf("BUG: cannot parse %q: %w", u, err))
 		}
-		bus.add(pu)
 		urls[i] = pu
 	}
 	up := &URLPrefix{}
@@ -1108,8 +1396,11 @@ func mustParseURLs(us []string) *URLPrefix {
 	} else {
 		up.vOriginal = us
 	}
-	up.bus.Store(bus)
 	up.busOriginal = urls
+	up.backendGroupCounters = make([]atomic.Uint32, len(us))
+	bus := newBackendURLs(&up.n)
+	bus.addGroup(urls, &up.backendGroupCounters[0])
+	up.bus.Store(bus)
 	return up
 }
 

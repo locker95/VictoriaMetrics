@@ -44,6 +44,10 @@ var (
 		"See https://docs.victoriametrics.com/victoriametrics/vmauth/#load-balancing for details")
 	defaultLoadBalancingPolicy = flag.String("loadBalancingPolicy", "least_loaded", "The default load balancing policy to use for backend urls specified inside url_prefix section. "+
 		"Supported policies: least_loaded, first_available. See https://docs.victoriametrics.com/victoriametrics/vmauth/#load-balancing")
+	defaultBackendLoadBalancingPolicy = flag.String("backendLoadBalancingPolicy", "", "The default load balancing policy to use for selecting among the targets discovered for a single backend url "+
+		"specified inside url_prefix section when -discoverBackendIPs or discover_backend_ips is set. Supported policies: least_loaded, first_available. "+
+		"If not set, then the value of -loadBalancingPolicy (or the effective load_balancing_policy for the given user / url_map) is used. "+
+		"See https://docs.victoriametrics.com/victoriametrics/vmauth/#load-balancing")
 	defaultMergeQueryArgs = flagutil.NewArrayString("mergeQueryArgs", "An optional list of client query arg names, which must be merged with args at backend urls. "+
 		"The rest of client query args are replaced by the corresponding query args from backend urls for security reasons; "+
 		"see https://docs.victoriametrics.com/victoriametrics/vmauth/#query-args-handling")
@@ -73,22 +77,23 @@ type UserInfo struct {
 	Username    string     `yaml:"username,omitempty"`
 	Password    string     `yaml:"password,omitempty"`
 
-	URLPrefix              *URLPrefix  `yaml:"url_prefix,omitempty"`
-	DiscoverBackendIPs     *bool       `yaml:"discover_backend_ips,omitempty"`
-	URLMaps                []URLMap    `yaml:"url_map,omitempty"`
-	DumpRequestOnErrors    bool        `yaml:"dump_request_on_errors,omitempty"`
-	HeadersConf            HeadersConf `yaml:",inline"`
-	MaxConcurrentRequests  int         `yaml:"max_concurrent_requests,omitempty"`
-	DefaultURL             *URLPrefix  `yaml:"default_url,omitempty"`
-	RetryStatusCodes       []int       `yaml:"retry_status_codes,omitempty"`
-	LoadBalancingPolicy    string      `yaml:"load_balancing_policy,omitempty"`
-	MergeQueryArgs         []string    `yaml:"merge_query_args,omitempty"`
-	DropSrcPathPrefixParts *int        `yaml:"drop_src_path_prefix_parts,omitempty"`
-	TLSCAFile              string      `yaml:"tls_ca_file,omitempty"`
-	TLSCertFile            string      `yaml:"tls_cert_file,omitempty"`
-	TLSKeyFile             string      `yaml:"tls_key_file,omitempty"`
-	TLSServerName          string      `yaml:"tls_server_name,omitempty"`
-	TLSInsecureSkipVerify  *bool       `yaml:"tls_insecure_skip_verify,omitempty"`
+	URLPrefix                  *URLPrefix  `yaml:"url_prefix,omitempty"`
+	DiscoverBackendIPs         *bool       `yaml:"discover_backend_ips,omitempty"`
+	URLMaps                    []URLMap    `yaml:"url_map,omitempty"`
+	DumpRequestOnErrors        bool        `yaml:"dump_request_on_errors,omitempty"`
+	HeadersConf                HeadersConf `yaml:",inline"`
+	MaxConcurrentRequests      int         `yaml:"max_concurrent_requests,omitempty"`
+	DefaultURL                 *URLPrefix  `yaml:"default_url,omitempty"`
+	RetryStatusCodes           []int       `yaml:"retry_status_codes,omitempty"`
+	LoadBalancingPolicy        string      `yaml:"load_balancing_policy,omitempty"`
+	BackendLoadBalancingPolicy string      `yaml:"backend_load_balancing_policy,omitempty"`
+	MergeQueryArgs             []string    `yaml:"merge_query_args,omitempty"`
+	DropSrcPathPrefixParts     *int        `yaml:"drop_src_path_prefix_parts,omitempty"`
+	TLSCAFile                  string      `yaml:"tls_ca_file,omitempty"`
+	TLSCertFile                string      `yaml:"tls_cert_file,omitempty"`
+	TLSKeyFile                 string      `yaml:"tls_key_file,omitempty"`
+	TLSServerName              string      `yaml:"tls_server_name,omitempty"`
+	TLSInsecureSkipVerify      *bool       `yaml:"tls_insecure_skip_verify,omitempty"`
 
 	MetricLabels map[string]string `yaml:"metric_labels,omitempty"`
 
@@ -273,6 +278,9 @@ type URLMap struct {
 	// LoadBalancingPolicy is load balancing policy among UrlPrefix backends.
 	LoadBalancingPolicy string `yaml:"load_balancing_policy,omitempty"`
 
+	// BackendLoadBalancingPolicy is load balancing policy used for selecting among the targets discovered for a single UrlPrefix backend.
+	BackendLoadBalancingPolicy string `yaml:"backend_load_balancing_policy,omitempty"`
+
 	// MergeQueryArgs is a list of client query args, which must be merged with the existing backend query args.
 	//
 	// The rest of client query args are replaced with the corresponding backend query args for security reasons.
@@ -329,8 +337,11 @@ type URLPrefix struct {
 	// requests are re-tried on other backend urls for these http response status codes
 	retryStatusCodes []int
 
-	// load balancing policy used
+	// load balancing policy used for selecting a backend among busOriginal entries
 	loadBalancingPolicy string
+
+	// load balancing policy used for selecting a target among the discovered targets of a single busOriginal entry
+	backendLoadBalancingPolicy string
 
 	// the list of client query args, which must be merged with backend query args.
 	//
@@ -345,6 +356,10 @@ type URLPrefix struct {
 
 	// n is an atomic counter, which is used for balancing load among available backends.
 	n atomic.Uint32
+
+	// backendGroupCounters holds one atomic counter per busOriginal entry, used for balancing load
+	// among the discovered targets of that particular backend.
+	backendGroupCounters []atomic.Uint32
 
 	// the list of backend urls
 	//
@@ -373,9 +388,50 @@ func (up *URLPrefix) setLoadBalancingPolicy(loadBalancingPolicy string) error {
 	}
 }
 
+func (up *URLPrefix) setBackendLoadBalancingPolicy(backendLoadBalancingPolicy string) error {
+	switch backendLoadBalancingPolicy {
+	case "", // empty string is equivalent to least_loaded
+		"least_loaded",
+		"first_available":
+		up.backendLoadBalancingPolicy = backendLoadBalancingPolicy
+		return nil
+	default:
+		return fmt.Errorf("unexpected backend_load_balancing_policy: %q; want least_loaded or first_available", backendLoadBalancingPolicy)
+	}
+}
+
 type backendURLs struct {
-	bhc backendHealthCheck
+	bhc    backendHealthCheck
+	n      *atomic.Uint32
+	groups []*backendURLGroup
+}
+
+// backendURLGroup holds the backend urls discovered for a single busOriginal entry.
+type backendURLGroup struct {
+	n   *atomic.Uint32
 	bus []*backendURL
+}
+
+func (g *backendURLGroup) isBroken() bool {
+	for _, bu := range g.bus {
+		if !bu.isBroken() {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *backendURLGroup) minConcurrentRequests() int32 {
+	minReqs := int32(math.MaxInt32)
+	for _, bu := range g.bus {
+		if bu.isBroken() {
+			continue
+		}
+		if n := bu.concurrentRequests.Load(); n < minReqs {
+			minReqs = n
+		}
+	}
+	return minReqs
 }
 
 type backendHealthCheck struct {
@@ -404,22 +460,30 @@ func (bhc *backendHealthCheck) stop() {
 	bhc.wg.Wait()
 }
 
-func newBackendURLs() *backendURLs {
+func newBackendURLs(n *atomic.Uint32) *backendURLs {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &backendURLs{
 		bhc: backendHealthCheck{
 			ctx:    ctx,
 			cancel: cancel,
 		},
+		n: n,
 	}
 }
 
-func (bus *backendURLs) add(u *url.URL) {
-	bus.bus = append(bus.bus, &backendURL{
-		url:             u,
-		bhc:             &bus.bhc,
-		hasPlaceHolders: hasAnyPlaceholders(u),
-	})
+func (bus *backendURLs) addGroup(urls []*url.URL, n *atomic.Uint32) {
+	g := &backendURLGroup{
+		n:   n,
+		bus: make([]*backendURL, len(urls)),
+	}
+	for i, u := range urls {
+		g.bus[i] = &backendURL{
+			url:             u,
+			bhc:             &bus.bhc,
+			hasPlaceHolders: hasAnyPlaceholders(u),
+		}
+	}
+	bus.groups = append(bus.groups, g)
 }
 
 func (bus *backendURLs) stopHealthChecks() {
@@ -495,7 +559,11 @@ func (bu *backendURL) put() {
 
 func (up *URLPrefix) getBackendsCount() int {
 	bus := up.bus.Load()
-	return len(bus.bus)
+	n := 0
+	for _, g := range bus.groups {
+		n += len(g.bus)
+	}
+	return n
 }
 
 // getBackendURL returns the backendURL depending on the load balance policy.
@@ -507,14 +575,24 @@ func (up *URLPrefix) getBackendURL() *backendURL {
 	up.discoverBackendAddrsIfNeeded()
 
 	bus := up.bus.Load()
-	if len(bus.bus) == 0 {
+	if len(bus.groups) == 0 {
 		return nil
 	}
 
+	var g *backendURLGroup
 	if up.loadBalancingPolicy == "first_available" {
-		return getFirstAvailableBackendURL(bus.bus)
+		g = bus.getFirstAvailable()
+	} else {
+		g = bus.getLeastLoaded()
 	}
-	return getLeastLoadedBackendURL(bus.bus, &up.n)
+	if len(g.bus) == 0 {
+		return nil
+	}
+
+	if up.backendLoadBalancingPolicy == "first_available" {
+		return g.getFirstAvailable()
+	}
+	return g.getLeastLoaded()
 }
 
 func (up *URLPrefix) discoverBackendAddrsIfNeeded() {
@@ -587,25 +665,40 @@ func (up *URLPrefix) discoverBackendAddrsIfNeeded() {
 	}
 	cancel()
 
-	// generate new backendURLs for the resolved IPs
-	busNew := newBackendURLs()
-	for _, bu := range up.busOriginal {
+	// generate new backendURLs for the resolved IPs, one group per busOriginal entry
+	busNew := newBackendURLs(&up.n)
+	for i, bu := range up.busOriginal {
 		host := bu.Hostname()
-		for _, addr := range hostToAddrs[host] {
+		addrs := hostToAddrs[host]
+		urls := make([]*url.URL, len(addrs))
+		for j, addr := range addrs {
 			buCopy := *bu
 			buCopy.Host = addr
-			busNew.add(&buCopy)
+			urls[j] = &buCopy
 		}
+		busNew.addGroup(urls, &up.backendGroupCounters[i])
 	}
 
 	bus := up.bus.Load()
-	if areEqualBackendURLs(bus.bus, busNew.bus) {
+	if areEqualBackendURLGroups(bus.groups, busNew.groups) {
 		return
 	}
 
 	// Store new backend urls
 	up.bus.Store(busNew)
 	bus.stopHealthChecks()
+}
+
+func areEqualBackendURLGroups(a, b []*backendURLGroup) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, g := range a {
+		if !areEqualBackendURLs(g.bus, b[i].bus) {
+			return false
+		}
+	}
+	return true
 }
 
 func areEqualBackendURLs(a, b []*backendURL) bool {
@@ -621,11 +714,12 @@ func areEqualBackendURLs(a, b []*backendURL) bool {
 	return true
 }
 
-// getFirstAvailableBackendURL returns the first available backendURL, which isn't broken.
-// If all backendURLs are broken, then returns the first backendURL.
+// getFirstAvailable returns the first available backendURL in g, which isn't broken.
+// If all backendURLs in g are broken, then returns the first one.
 //
 // backendURL.put() must be called on the returned backendURL after the request is complete.
-func getFirstAvailableBackendURL(bus []*backendURL) *backendURL {
+func (g *backendURLGroup) getFirstAvailable() *backendURL {
+	bus := g.bus
 	bu := bus[0]
 	if !bu.isBroken() {
 		// Fast path - send the request to the first url.
@@ -648,11 +742,14 @@ func getFirstAvailableBackendURL(bus []*backendURL) *backendURL {
 	return bu
 }
 
-// getLeastLoadedBackendURL returns a non-broken backendURL with the lowest number of concurrent requests.
-// If all backendURLs are broken, then returns the first backendURL.
+// getLeastLoaded returns a non-broken backendURL in g with the lowest number of concurrent requests.
+// If all backendURLs in g are broken, then returns the first one.
 //
 // backendURL.put() must be called on the returned backendURL after the request is complete.
-func getLeastLoadedBackendURL(bus []*backendURL, atomicCounter *atomic.Uint32) *backendURL {
+func (g *backendURLGroup) getLeastLoaded() *backendURL {
+	bus := g.bus
+	atomicCounter := g.n
+
 	firstBu := bus[0]
 	if len(bus) == 1 {
 		firstBu.get()
@@ -702,6 +799,62 @@ func getLeastLoadedBackendURL(bus []*backendURL, atomicCounter *atomic.Uint32) *
 	buMin.get()
 	atomicCounter.CompareAndSwap(n+1, buMinIdx+1)
 	return buMin
+}
+
+// getFirstAvailable returns the first backendURLGroup in bus, which has at least a single non-broken backend url.
+// If all groups are fully broken, then returns the first one.
+func (bus *backendURLs) getFirstAvailable() *backendURLGroup {
+	groups := bus.groups
+	g := groups[0]
+	if !g.isBroken() {
+		// Fast path - use the first group.
+		return g
+	}
+
+	// Slow path - the first group is temporarily unavailable. Fall back to the remaining groups.
+	for i := 1; i < len(groups); i++ {
+		if !groups[i].isBroken() {
+			return groups[i]
+		}
+	}
+
+	// All groups are unavailable, then return the first one, it could help increase the success rate of the requests.
+	return g
+}
+
+// getLeastLoaded returns a non-broken backendURLGroup in bus with the lowest number of concurrent requests
+// among its non-broken backend urls. If all groups are broken, then returns the first one.
+func (bus *backendURLs) getLeastLoaded() *backendURLGroup {
+	groups := bus.groups
+	atomicCounter := bus.n
+	firstGroup := groups[0]
+	if len(groups) == 1 {
+		return firstGroup
+	}
+
+	n := atomicCounter.Add(1) - 1
+	gMinIdx := n % uint32(len(groups))
+	minRequests := groups[gMinIdx].minConcurrentRequests()
+	for i := uint32(1); i < uint32(len(groups)); i++ {
+		idx := (n + i) % uint32(len(groups))
+		g := groups[idx]
+		if g.isBroken() {
+			continue
+		}
+
+		reqs := g.minConcurrentRequests()
+		if reqs < minRequests || groups[gMinIdx].isBroken() {
+			gMinIdx = idx
+			minRequests = reqs
+		}
+	}
+	gMin := groups[gMinIdx]
+	if gMin.isBroken() {
+		// If all groups are broken, then returns the first group.
+		return firstGroup
+	}
+	atomicCounter.CompareAndSwap(n+1, gMinIdx+1)
+	return gMin
 }
 
 // UnmarshalYAML unmarshals up from yaml.
@@ -1121,6 +1274,7 @@ func (ui *UserInfo) getMetricLabels() (string, error) {
 func (ui *UserInfo) initURLs() error {
 	retryStatusCodes := defaultRetryStatusCodes.Values()
 	loadBalancingPolicy := *defaultLoadBalancingPolicy
+	backendLoadBalancingPolicy := *defaultBackendLoadBalancingPolicy
 	mergeQueryArgs := *defaultMergeQueryArgs
 	dropSrcPathPrefixParts := 0
 	discoverBackendIPs := *discoverBackendIPsGlobal
@@ -1129,6 +1283,9 @@ func (ui *UserInfo) initURLs() error {
 	}
 	if ui.LoadBalancingPolicy != "" {
 		loadBalancingPolicy = ui.LoadBalancingPolicy
+	}
+	if ui.BackendLoadBalancingPolicy != "" {
+		backendLoadBalancingPolicy = ui.BackendLoadBalancingPolicy
 	}
 	if len(ui.MergeQueryArgs) != 0 {
 		mergeQueryArgs = ui.MergeQueryArgs
@@ -1151,6 +1308,14 @@ func (ui *UserInfo) initURLs() error {
 		if err := up.setLoadBalancingPolicy(loadBalancingPolicy); err != nil {
 			return err
 		}
+		// backend_load_balancing_policy defaults to the effective load_balancing_policy for backward compatibility.
+		blbp := backendLoadBalancingPolicy
+		if blbp == "" {
+			blbp = loadBalancingPolicy
+		}
+		if err := up.setBackendLoadBalancingPolicy(blbp); err != nil {
+			return err
+		}
 		up.mergeQueryArgs = mergeQueryArgs
 	}
 	if ui.DefaultURL != nil {
@@ -1171,6 +1336,7 @@ func (ui *UserInfo) initURLs() error {
 		}
 		rscs := retryStatusCodes
 		lbp := loadBalancingPolicy
+		blbp := backendLoadBalancingPolicy
 		mqa := mergeQueryArgs
 		dsp := dropSrcPathPrefixParts
 		dbd := discoverBackendIPs
@@ -1179,6 +1345,9 @@ func (ui *UserInfo) initURLs() error {
 		}
 		if e.LoadBalancingPolicy != "" {
 			lbp = e.LoadBalancingPolicy
+		}
+		if e.BackendLoadBalancingPolicy != "" {
+			blbp = e.BackendLoadBalancingPolicy
 		}
 		if len(e.MergeQueryArgs) != 0 {
 			mqa = e.MergeQueryArgs
@@ -1191,6 +1360,13 @@ func (ui *UserInfo) initURLs() error {
 		}
 		e.URLPrefix.retryStatusCodes = rscs
 		if err := e.URLPrefix.setLoadBalancingPolicy(lbp); err != nil {
+			return err
+		}
+		// backend_load_balancing_policy defaults to the effective load_balancing_policy for backward compatibility.
+		if blbp == "" {
+			blbp = lbp
+		}
+		if err := e.URLPrefix.setBackendLoadBalancingPolicy(blbp); err != nil {
 			return err
 		}
 		e.URLPrefix.mergeQueryArgs = mqa
@@ -1307,10 +1483,12 @@ func (up *URLPrefix) sanitizeAndInitialize() error {
 		up.busOriginal[i] = puNew
 	}
 
-	// Initialize up.bus
-	bus := newBackendURLs()
-	for _, bu := range up.busOriginal {
-		bus.add(bu)
+	up.backendGroupCounters = make([]atomic.Uint32, len(up.busOriginal))
+
+	// Initialize up.bus with a single-element group per busOriginal entry.
+	bus := newBackendURLs(&up.n)
+	for i, bu := range up.busOriginal {
+		bus.addGroup([]*url.URL{bu}, &up.backendGroupCounters[i])
 	}
 	up.bus.Store(bus)
 

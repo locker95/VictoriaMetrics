@@ -946,6 +946,22 @@ Each `url_prefix` in the [-auth.config](#auth-config) can be specified in the fo
     load_balancing_policy: first_available
   ```
 
+  The `load_balancing_policy` option (and the `-loadBalancingPolicy` command-line flag) selects among the backends listed under `url_prefix`.
+  When a single backend is expanded into multiple discovered targets via [`discover_backend_ips`](#discovering-backend-ips), a separate `backend_load_balancing_policy`
+  option (and the `-backendLoadBalancingPolicy` command-line flag) controls how `vmauth` selects among the targets discovered for that particular backend.
+  By default, `backend_load_balancing_policy` inherits the effective `load_balancing_policy` value, so existing configs keep working exactly as before.
+  For example, the following config uses `first_available` to pick between the two availability zones, while spreading load evenly across the instances discovered in the active zone:
+
+  ```yaml
+  unauthorized_user:
+    url_prefix:
+    - http://vmselect-az1:8481/
+    - http://vmselect-az2:8481/
+    discover_backend_ips: true
+    load_balancing_policy: first_available
+    backend_load_balancing_policy: least_loaded
+  ```
+
 The load balancing feature can be used in the following cases:
 
 * Balancing the load among multiple `vmselect` and/or `vminsert` nodes in [VictoriaMetrics cluster](https://docs.victoriametrics.com/victoriametrics/cluster-victoriametrics/).
@@ -1022,6 +1038,9 @@ There are the following solutions for this issue:
   This functionality is useful for balancing load across backend instances running on different TCP ports, since DNS SRV records include TCP ports.
 
   The `discover_backend_ips` option can be specified at `user` and `url_map` level in the [`-auth.config`](#auth-config). It can also be enabled globally via the `-discoverBackendIPs` command-line flag.
+
+  By default, `vmauth` uses the same load balancing policy for selecting among the discovered targets of a backend as the one used for selecting among the configured backends themselves.
+  This can be changed via the `backend_load_balancing_policy` option (or the `-backendLoadBalancingPolicy` command-line flag). See [these docs](#load-balancing) for more details.
 
 See also [load balancing docs](#load-balancing).
 

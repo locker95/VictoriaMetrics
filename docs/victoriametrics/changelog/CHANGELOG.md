@@ -26,6 +26,8 @@ See also [LTS releases](https://docs.victoriametrics.com/victoriametrics/lts-rel
 
 ## tip
 
+* FEATURE: [vmauth](https://docs.victoriametrics.com/victoriametrics/vmauth/): add `backend_load_balancing_policy` option (and the corresponding `-backendLoadBalancingPolicy` command-line flag), which allows configuring a load balancing policy for selecting among the targets discovered for a single backend via [`discover_backend_ips`](https://docs.victoriametrics.com/victoriametrics/vmauth/#discovering-backend-ips), independently of the `load_balancing_policy` used for selecting among the configured backends. By default `backend_load_balancing_policy` inherits the effective `load_balancing_policy` value, so this change is backward-compatible. See [these docs](https://docs.victoriametrics.com/victoriametrics/vmauth/#load-balancing) for more details.
+
 ## [v1.148.0](https://github.com/VictoriaMetrics/VictoriaMetrics/releases/tag/v1.148.0)
 
 Released at 2026-07-20
